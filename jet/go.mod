@@ -1,3 +1,3 @@
-module github.com/fyrte/mofu-templates/jet
+module github.com/fyrte/mofu-templ/jet
 
 go 1.25.0

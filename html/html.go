@@ -17,6 +17,7 @@ import (
 type HTMLTemplate struct {
 	t        *template.Template
 	config   *Config
+	pattern  string
 	mu       sync.RWMutex
 	lastLoad time.Time
 }
@@ -48,14 +49,19 @@ type RenderData struct {
 	Data   any
 }
 
-func Sparkle(pattern string, cfgs ...*Config) mofu.TemplateConfig {
-	cfg := &Config{}
-
-	if len(cfgs) > 0 && cfgs[0] != nil {
-		cfg = cfgs[0]
+// Sparkle creates a new template with optional configuration
+func Sparkle(pattern string, opts ...Option) mofu.TemplateConfig {
+	cfg := &Config{
+		Delimiters:  []string{"{{", "}}"},
+		Funcs:       template.FuncMap{},
+		TemplateDir: "templates",
+		AssetDir:    "assets",
+		EnableCache: true,
 	}
 
-	cfg.setDefaults()
+	for _, opt := range opts {
+		opt(cfg)
+	}
 
 	return &html{
 		pattern: pattern,
@@ -74,7 +80,11 @@ func (h *html) CreateEngine() (mofu.TemplateEngine, error) {
 		return nil, err
 	}
 
-	engine := &HTMLTemplate{t: t, config: h.config}
+	engine := &HTMLTemplate{
+		t:       t,
+		config:  h.config,
+		pattern: h.pattern,
+	}
 
 	if err := engine.Validate(); err != nil {
 		return nil, fmt.Errorf("template validation failed: %w", err)
@@ -135,24 +145,6 @@ func (c *Config) assetPath(name string) string {
 	return filepath.Join(c.AssetDir, name)
 }
 
-func (c *Config) setDefaults() {
-	if c.Delimiters == nil {
-		c.Delimiters = []string{"{{", "}}"}
-	}
-	if c.Funcs == nil {
-		c.Funcs = template.FuncMap{}
-	}
-	if c.I18n != nil && c.I18n.DefaultLang != "" {
-		c.I18n.currentLang = c.I18n.DefaultLang
-	}
-	if c.TemplateDir == "" {
-		c.TemplateDir = "templates"
-	}
-	if c.AssetDir == "" {
-		c.AssetDir = "assets"
-	}
-}
-
 // Default template functions
 func defaultFuncs() template.FuncMap {
 	return template.FuncMap{
@@ -195,7 +187,6 @@ func (h *HTMLTemplate) Render(w io.Writer, name string, data any) error {
 		return err
 	}
 
-	// TODO: Execute pre-render hooks ? i think no need for now :)
 	// Execute the template
 	err := h.t.ExecuteTemplate(w, name, data)
 
@@ -285,14 +276,46 @@ func (h *HTMLTemplate) validateTemplate(name string) error {
 	return nil
 }
 
-// Development mode methods
+// mergeFuncs merges all template functions
+func (h *HTMLTemplate) mergeFuncs() template.FuncMap {
+	funcs := defaultFuncs()
+
+	// Add i18n functions if configured
+	if h.config.I18n != nil {
+		funcs["t"] = h.config.I18n.Translate
+		funcs["setLang"] = h.config.I18n.SetLanguage
+		funcs["currentLang"] = h.config.I18n.CurrentLanguage
+	}
+
+	// Add asset function
+	if h.config.AssetDir != "" {
+		funcs["asset"] = func(name string) string {
+			return h.config.assetPath(name)
+		}
+	}
+
+	// Merge with user-provided funcs
+	maps.Copy(funcs, h.config.Funcs)
+	return funcs
+}
+
+// reloadIfNeeded reloads templates in development mode
 func (h *HTMLTemplate) reloadIfNeeded() error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Simple implementation - always reload in development
-	// no file watcher, i think just use external stuff like Air
-	t, err := template.New("").ParseGlob(filepath.Join(h.config.TemplateDir, "*"))
+	t := template.New("")
+
+	// Apply delimiters
+	t = t.Delims(h.config.Delimiters[0], h.config.Delimiters[1])
+
+	// Apply all functions (including custom ones)
+	funcs := h.mergeFuncs()
+	t = t.Funcs(funcs)
+
+	// Parse templates with correct pattern
+	pattern := filepath.Join(h.config.TemplateDir, h.pattern)
+	t, err := t.ParseGlob(pattern)
 	if err != nil {
 		return err
 	}
